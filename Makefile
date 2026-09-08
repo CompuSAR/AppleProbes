@@ -6,3 +6,6 @@ all: sector_order.lst
 	$(ASM) -x -dotdir $(CPU_OPTIONS) -dependall=make -depfile "$*.dep" -L "$*.lst" "$<" -o "$*.out"
 	sed -i -e 's/$*\.bin/\0 $*.lst/' "$*.dep"
 
+clean:
+	$(RM) *.out *.dep *.lst
+.PHONY: clean
