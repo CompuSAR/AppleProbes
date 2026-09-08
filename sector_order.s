@@ -14,7 +14,6 @@ COUT            .eq     $FDED           ; Print char in A
     lda #hello&$ff
     sta LOC0
 
-hello:  .db "Hello, world\r"
 Print:
     ldy #0
     jmp .enter
@@ -25,3 +24,4 @@ Print:
     lda (LOC0),y
     bne .out
     rts
+hello:  .db "Hello, world", 13, 0

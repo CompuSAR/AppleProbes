@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+
 """
 send_to_apple.py
 
@@ -23,6 +24,7 @@ Usage:
 import argparse
 import re
 import sys
+import serial
 import time
 
 BAUD = 19200
@@ -53,6 +55,7 @@ def parse_lst(path):
     last_record = None      # (address, [bytes]) of the most recent Data line
     pending_array = None    # (start_address, [fill_bytes]) awaiting an
                              # "Array" (repeat-fill, e.g. .fill/.ds) line
+    first_addr1 = None
 
     with open(path) as f:
         for raw_line in f:
@@ -73,6 +76,8 @@ def parse_lst(path):
                     continue
 
                 out_addr = int(match['address'], 16)
+                if first_addr1 is None:
+                    first_addr1 = out_addr
 
                 # A pending array fills every address between the previous
                 # record's end and this line's address with its one byte.
@@ -99,8 +104,7 @@ def parse_lst(path):
                     "Array address does not immediately follow previous address"
                 pending_array = (out_addr, last_record[1])
 
-    return sorted(memory.items())
-
+    return sorted(memory.items()), first_addr1
 
 def group_into_runs(byte_list):
     """Turn a sorted [(addr, byte), ...] list into a list of
@@ -115,113 +119,65 @@ def group_into_runs(byte_list):
     return runs
 
 
-def build_commands(runs, bytes_per_line):
-    """Turn runs of bytes into a flat list of monitor command lines, e.g.
-    ["2000:00 01 FE 6A 85", ":42 37 8B", "2010:AA", ...]."""
-
-    commands = []
-    for start_addr, data in runs:
-        for offset in range(0, len(data), bytes_per_line):
-            chunk = data[offset:offset + bytes_per_line]
-            hex_bytes = ' '.join(f'{b:02X}' for b in chunk)
-            if offset == 0:
-                commands.append(f'{start_addr:04X}:{hex_bytes}')
-            else:
-                commands.append(f':{hex_bytes}')
-    return [cmd.upper() for cmd in commands]
-
-
-# Bits 6-7 of an Apple II text-page byte only select display mode (inverse /
+# Bit 7 of an Apple II text-page byte only select display mode (inverse /
 # flash / normal); they don't change which character it is. When comparing
 # a line we sent against the echo we got back, mask them off on both sides
 # so mode bits never cause a false mismatch.
-CHAR_MASK = 0x3F
+CHAR_MASK = 0x7F
 
+def recv_chars(ser, block):
+    line = ""
+    if block:
+        for b in ser.read():
+            line += chr(b&CHAR_MASK)
+    else:
+        for b in ser.read_all():
+            line += chr(b&CHAR_MASK)
 
-def char_matches(byte, ch):
-    """True if a text-page byte represents the character ch, regardless of
-    its inverse/flash/normal display-mode bits (see CHAR_MASK above)."""
-    return (byte & CHAR_MASK) == (ord(ch) & CHAR_MASK)
+    for c in line:
+        if c == '\r':
+            print()
+        else:
+            print(c, end="")
 
+    return line
 
-def ensure_monitor_prompt(ser, verbose, timeout=2.0):
-    """Send a CR and see what prompt comes back. '*' means we're already at
-    the System Monitor prompt. ']' means we're sitting at the Applesoft
-    BASIC prompt, so issue CALL -151 to drop into the monitor."""
+def recv_char(ser, ch):
+    while True:
+        line = ser.read()
+        if (line[len(line)-1] & CHAR_MASK) == (ord(ch)&CHAR_MASK):
+            break
 
-    def read_response():
-        deadline = time.time() + timeout
-        buf = b''
-        while time.time() < deadline:
-            chunk = ser.read(256)
-            if chunk:
-                buf += chunk
-            else:
-                break
-        return buf
+    if ch=='\r':
+        print()
+    else:
+        print(ch, end="")
 
-    ser.reset_input_buffer()
-    ser.write(b'\r')
+def send_char(ser, ch):
+    recv_chars(ser, False)
+    ser.write(ch.encode())
     ser.flush()
-    response = read_response()
-    if verbose:
-        print(f"prompt check: {response!r}", file=sys.stderr)
+    time.sleep(args.delay)
 
-    if any(char_matches(b, '*') for b in response):
-        if verbose:
-            print("Already at the monitor prompt.", file=sys.stderr)
-        return True
+    recv_char(ser, ch)
 
-    if any(char_matches(b, ']') for b in response):
-        if verbose:
-            print("At the BASIC prompt, entering monitor (CALL -151)...",
-                  file=sys.stderr)
-        ser.write(b'CALL -151\r')
-        ser.flush()
-        response = read_response()
-        if verbose:
-            print(f"monitor entry response: {response!r}", file=sys.stderr)
-        if any(char_matches(b, '*') for b in response):
-            return True
-        print("warning: sent CALL -151 but never saw a '*' prompt back",
-              file=sys.stderr)
-        return False
+def send_chars(ser, s):
+    for c in s:
+        send_char(ser, c)
 
-    print(f"warning: didn't recognize the prompt ({response!r}); "
-          f"proceeding anyway", file=sys.stderr)
-    return False
+def wait_prompt(ser):
+    while True:
+        prompt = recv_chars(ser, True)
+        if prompt[len(prompt)-1] == ']':
+            send_chars(ser, "CALL -151\r")
+        elif prompt[len(prompt)-1] == '*':
+            break
 
+def enter_monitor(ser):
+    print("\n-- Entering monitor")
+    send_char(ser, "\r")
 
-def send_commands(port, commands, delay, wait_echo, verbose):
-    import serial  # imported lazily so --dry-run doesn't need pyserial
-
-    with serial.Serial(port, BAUD, timeout=2) as ser:
-        ensure_monitor_prompt(ser, verbose)
-
-        for i, cmd in enumerate(commands):
-            line = (cmd.upper() + '\r').encode('ascii')
-            ser.write(line)
-            ser.flush()
-
-            if wait_echo:
-                # Many Apple II serial cards/terminal firmware echo back
-                # every character they receive; reading the echo back is a
-                # simple, hardware-independent way to pace the transfer
-                # instead of guessing at delays.
-                echoed = ser.read(len(line))
-                sent_chars = bytes(b & CHAR_MASK for b in line)
-                echoed_chars = bytes(b & CHAR_MASK for b in echoed)
-                if sent_chars != echoed_chars and verbose:
-                    print(f"warning: echo mismatch on line {i}: "
-                          f"sent {line!r}, got {echoed!r}", file=sys.stderr)
-            elif delay:
-                time.sleep(delay)
-
-            if verbose:
-                print(cmd)
-
-    print(f"Sent {len(commands)} lines.")
-
+    wait_prompt(ser)
 
 def main():
     ap = argparse.ArgumentParser(
@@ -233,9 +189,8 @@ def main():
     ap.add_argument('--bytes-per-line', type=int, default=8,
                      help="How many data bytes to pack per monitor command "
                           "line (default: 8)")
-    ap.add_argument('--delay', type=float, default=0.05,
-                     help="Seconds to pause after each line when not "
-                          "waiting for echo (default: 0.05)")
+    ap.add_argument('--delay', type=float, default=0,
+                     help="Seconds to pause after each char.")
     ap.add_argument('--wait-echo', dest='wait_echo', action='store_true',
                      default=True,
                      help="Wait for the Apple II to echo each line back "
@@ -259,33 +214,41 @@ def main():
                      help="Print each command line as it's sent (default: on)")
     ap.add_argument('-q', '--quiet', dest='verbose', action='store_false',
                      help="Don't print each command line as it's sent")
+    global args
     args = ap.parse_args()
 
-    if not args.dry_run and not args.port:
+    if not args.port:
         ap.error("port is required unless --dry-run is given")
 
-    memory = parse_lst(args.list_file)
+    memory, run_addr = parse_lst(args.list_file)
     if not memory:
         print("No data records found in listing file.", file=sys.stderr)
         sys.exit(1)
 
     runs = group_into_runs(memory)
-    commands = build_commands(runs, args.bytes_per_line)
-
-    if args.run is not None:
-        run_addr = runs[0][0] if args.run == 'AUTO' else int(args.run, 16)
-        commands.append(f'{run_addr:04X}G'.upper())
 
     total_bytes = sum(len(data) for _, data in runs)
-    print(f"{len(runs)} contiguous run(s), {total_bytes} byte(s), "
-          f"{len(commands)} command line(s).", file=sys.stderr)
+    print(f"{len(runs)} contiguous run(s), {total_bytes} byte(s), ", file=sys.stderr)
 
-    if args.dry_run:
-        for cmd in commands:
-            print(cmd)
-        return
+    with serial.Serial(args.port, BAUD, timeout=2) as ser:
+        ser.read_all()
+        send_char(ser, "\r")
+        send_chars(ser, "\x02\r")
+        enter_monitor(ser)
+        for addr, data in runs:
+            i = 0
+            send_chars(ser, f"{addr:04X}")
+            while len(data)>i:
+                send_chars(ser, ":")
+                j = min(args.bytes_per_line, len(data)-i)
+                while j>0:
+                    send_chars(ser, f"{data[i]:02X} ")
+                    i = i+1
+                    j = j-1
+                    addr = addr+1
 
-    send_commands(args.port, commands, args.delay, args.wait_echo, args.verbose)
+                send_char(ser, "\r")
+                wait_prompt(ser)
 
 
 if __name__ == '__main__':
