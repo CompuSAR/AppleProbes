@@ -27,6 +27,10 @@ import sys
 import serial
 import time
 
+import termios
+import tty
+import select
+
 BAUD = 19200
 
 # Same grammar as parse_lst, used to pull (address, data-bytes) records out
@@ -179,6 +183,33 @@ def enter_monitor(ser):
 
     wait_prompt(ser)
 
+def dumb_term(ser):
+    formerstate = termios.tcgetattr(sys.stdin)
+    tty.setcbreak(sys.stdin)
+    try:
+        while(True):
+            readready, writeready, err = select.select([ser, sys.stdin], [], [])
+
+            for r in readready:
+                if r is ser:
+                    chars = ser.read_all()
+
+                    for c in chars:
+                        c = c & 0x7f
+                        if c==13:
+                            print()
+                        else:
+                            print(chr(c), end="", flush=True)
+                if r is sys.stdin:
+                    ch = sys.stdin.read(1)
+
+                    if ch=='\n':
+                        ser.write(b'\r')
+                    else:
+                        ser.write(ch.encode())
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, formerstate)
+
 def main():
     ap = argparse.ArgumentParser(
         description="Send a vasm .lst listing to an Apple II monitor over serial.")
@@ -249,6 +280,8 @@ def main():
 
                 send_char(ser, "\r")
                 wait_prompt(ser)
+
+        dumb_term(ser)
 
 
 if __name__ == '__main__':
