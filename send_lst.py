@@ -206,7 +206,7 @@ def dumb_term(ser):
                     if ch=='\n':
                         ser.write(b'\r')
                     else:
-                        ser.write(ch.encode())
+                        ser.write(ch.upper().encode())
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, formerstate)
 
