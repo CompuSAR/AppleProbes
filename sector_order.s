@@ -13,17 +13,41 @@ SECT            .eq $300
 TRK             .eq $301
 VOL             .eq $302
 repeats         .eq $303
+track           .eq $304
 bits            .eq $3c
 
 sector          .eq $3d
 data_ptr        .eq $26
 
+LOCRPL      .eq $3e3
+RWTS            .eq $3d9
+
 start:
     .org $1000
-    ldx #$60
-    lda IWM_SEL_DRIVE_1,x
+    lda #34
+    sta track
+
+.trackstart:
+    lda #'.'
+    jsr COUT
+
+    jsr LOCRPL
+    sty LOC0
+    sta LOC0+1
+
+    ldy #1
+    lda (LOC0),y        ; Slot number
+    tax
+    ldy #4
+    lda track
+    sta (LOC0),y        ; Track number
     lda IWM_MOTOR_ON,x
 
+    lda LOC0+1
+    ldy LOC0
+    jsr RWTS
+
+    lda IWM_MOTOR_ON,x
     lda #32
     sta repeats
 
@@ -51,6 +75,7 @@ start:
 .readHead1
     lda IWM_Q6_OFF,x
     bpl .readHead1
+    sec
     rol
     sta bits
 
@@ -85,7 +110,15 @@ start:
     dec repeats
     bne .read1
 
+    dec track
+    bmi .finished
+    jmp .trackstart
+
+.finished
     lda IWM_MOTOR_OFF,x
+
+    lda #0
+    sta $48
 
     rts
 
