@@ -22,15 +22,18 @@ data_ptr        .eq $26
 LOCRPL      .eq $3e3
 RWTS            .eq $3d9
 
+sectors         .eq     $1500
+tracks          .eq     $1600
+volumes         .eq     $1700
+
+NUM_SECTORS     .eq     32
+
 start:
     .org $1000
     lda #34
     sta track
 
 .trackstart:
-    lda #'.'
-    jsr COUT
-
     jsr LOCRPL
     sty LOC0
     sta LOC0+1
@@ -48,7 +51,7 @@ start:
     jsr RWTS
 
     lda IWM_MOTOR_ON,x
-    lda #32
+    lda #NUM_SECTORS
     sta repeats
 
     sec
@@ -87,29 +90,48 @@ start:
     sta SECT,y
     bne .readHead1
 
-    ; Read the header
+    ldy repeats
+    lda SECT
+    sta sectors,y
+    lda TRK
+    sta tracks,y
+    lda VOL
+    sta volumes,y
+
+    dec repeats
+    bne .read1
+
+    ; Print the track's data
+    ; Print the header
     lda #found_msg>>8
     sta LOC0 + 1
     lda #found_msg & $ff
     sta LOC0
     jsr Print
+    lda track
+    jsr PRBYTE
+    lda #$D
+    jsr COUT
 
-    lda VOL
+    ldy #NUM_SECTORS
+.print_data
+    lda volumes,y
     jsr PRBYTE
     lda #" "
     jsr COUT
-    lda TRK
+    lda tracks,y
     jsr PRBYTE
     lda #" "
     jsr COUT
-    LDA SECT
+    lda sectors,y
     jsr PRBYTE
-    lda #13
+    lda #$D
     jsr COUT
 
-    dec repeats
-    bne .read1
+    dey
+    bne .print_data
 
+    ; Next track
     dec track
     bmi .finished
     jmp .trackstart
@@ -132,4 +154,4 @@ Print:
     lda (LOC0),y
     bne .out
     rts
-found_msg:  .db "LOCATED V,T,S: ", 0
+found_msg:  .db "V,T,S: FOR TRACK ", 0
